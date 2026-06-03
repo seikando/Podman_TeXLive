@@ -1,0 +1,90 @@
+FROM docker.io/library/ubuntu:24.04
+
+LABEL maintainer="Yuwsuke Kieda <yuw [at] seikando.info>"
+
+# ── 環境変数 ──────────────────────────────────────────────
+ENV TL_VERSION=2024 \
+    TL_PATH=/usr/local/texlive \
+    DEBIAN_FRONTEND=noninteractive \
+    TZ=Asia/Tokyo
+
+ENV TEXMF_LOCAL_PATH=${TL_PATH}/texmf-local \
+    TEXMF_DIST_PATH=${TL_PATH}/texmf-dist \
+    PATH=${TL_PATH}/bin/aarch64-linux:/bin:$PATH
+
+# ── APT パッケージ ─────────────────────────────────────────
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
+        wget \
+        unzip \
+        git \
+        ghostscript \
+        zsh \
+        fontconfig \
+        tzdata \
+        ca-certificates && \
+    ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime && \
+    echo "Asia/Tokyo" > /etc/timezone && \
+    apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
+
+# ── TeX Live インストール ───────────────────────────────────
+WORKDIR /tmp
+
+RUN mkdir install-tl-unx && \
+    wget --retry-connrefused --tries=5 --waitretry=10 \
+         -O /tmp/install-tl-unx.tar.gz \
+         https://texlive.texjp.org/${TL_VERSION}/tlnet/install-tl-unx.tar.gz && \
+    tar -xz -C ./install-tl-unx --strip-components=1 \
+        -f /tmp/install-tl-unx.tar.gz && \
+    printf "%s\n" \
+      "TEXDIR ${TL_PATH}" \
+      "selected_scheme scheme-full" \
+      "option_doc 0" \
+      "option_src 0" \
+      > ./install-tl-unx/texlive.profile && \
+    ./install-tl-unx/install-tl \
+      -repository https://texlive.texjp.org/${TL_VERSION}/tlnet/ \
+      -profile ./install-tl-unx/texlive.profile && \
+    rm -rf /tmp/*
+
+# ── CJKフォント・フォントキャッシュ設定 ─────────────────────
+RUN git clone --depth=1 https://github.com/texjporg/cjk-gs-support.git && \
+    ( cd cjk-gs-support && \
+      ./cjk-gs-integrate.pl --cleanup --force && \
+      ./cjk-gs-integrate.pl --force \
+    ) && \
+    rm -rf cjk-gs-support && \
+    mktexlsr && \
+    luaotfload-tool -u -f && \
+    printf "%s\n" \
+      '<?xml version="1.0"?>' \
+      '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">' \
+      '<fontconfig>' \
+      "  <dir>${TEXMF_DIST_PATH}/fonts/opentype</dir>" \
+      "  <dir>${TEXMF_DIST_PATH}/fonts/truetype</dir>" \
+      "  <dir>${TEXMF_LOCAL_PATH}/fonts/opentype</dir>" \
+      "  <dir>${TEXMF_LOCAL_PATH}/fonts/truetype</dir>" \
+      '</fontconfig>' \
+      > /etc/fonts/local.conf && \
+    fc-cache -r
+
+# ── Volume / 作業ディレクトリ ──────────────────────────────
+# Podman rootless: UID/GID マッピングを考慮し、
+# volume マウント先のディレクトリを作成してパーミッションを緩めておく
+RUN mkdir -p /usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/fonts/otl && \
+    chmod 777 /usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/fonts/otl
+
+VOLUME ["/usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/fonts/otl"]
+
+WORKDIR /workdir
+
+# Podman rootless でホストユーザーとの UID マッピングが
+# 自動的に行われるため、非 root ユーザーは不要な場合が多いが
+# セキュリティポリシーに応じて以下のコメントを外すこと:
+# RUN useradd -m -u 1000 texuser
+# USER texuser
+
+CMD ["/bin/zsh"]
