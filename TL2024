@@ -74,10 +74,10 @@ RUN git clone --depth=1 https://github.com/texjporg/cjk-gs-support.git && \
 # ── Volume / 作業ディレクトリ ──────────────────────────────
 # Podman rootless: UID/GID マッピングを考慮し、
 # volume マウント先のディレクトリを作成してパーミッションを緩めておく
-RUN mkdir -p /usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/fonts/otl && \
-    chmod 777 /usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/fonts/otl
+RUN mkdir -p /usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/names && \
+    chmod 777 /usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/names
 
-VOLUME ["/usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/fonts/otl"]
+VOLUME ["/usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/names"]
 
 WORKDIR /workdir
 
