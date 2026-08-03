@@ -6,6 +6,7 @@ LABEL maintainer="Yuwsuke Kieda <yuw [at] seikando.info>"
 ENV TL_VERSION=2026 \
     TL_PATH=/usr/local/texlive \
     DEBIAN_FRONTEND=noninteractive \
+    DEBCONF_NOWARNINGS=yes \
     TZ=Asia/Tokyo
 
 # パッケージリポジトリ: 日本語 TeX 開発コミュニティ (texjp.org) の tlnet ミラー。
@@ -27,12 +28,17 @@ ENV TEXMF_LOCAL_PATH=${TL_PATH}/texmf-local \
     PATH=${TL_PATH}/bin/aarch64-linux:/bin:$PATH
 
 # ── APT パッケージ ─────────────────────────────────────────
+# perl-modules は必須。--no-install-recommends を付けると perl だけでは
+# 入らず、install-tl が要求する Pod::Usage も debconf が使う Term::ReadLine も
+# 欠落して "Can't locate Pod/Usage.pm in @INC" で失敗する。
+# 名前が見つからない場合はバージョン付き（perl-modules-5.40 など）を指定する。
 RUN apt-get update && \
     apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
         wget \
         unzip \
         perl \
+        perl-modules \
         ghostscript \
         zsh \
         fontconfig \
@@ -80,11 +86,15 @@ RUN mkdir install-tl-unx && \
 # TL_REPO が current を指すため、TL2027 リリース後は黙って TL2027 が
 # 入ることになる。それを検出して確実に失敗させる安全弁。
 # 意図してリリースを上げるときは TL_VERSION を書き換えること。
-RUN grep -q "TeX Live ${TL_VERSION}" ${TL_PATH}/release-texlive.txt || { \
+#
+# release-texlive.txt の 1 行目は次の書式:
+#   TeX Live (https://tug.org/texlive) version 2026
+# "TeX Live 2026" では間に URL が挟まるためマッチしない。
+RUN cat ${TL_PATH}/release-texlive.txt; \
+    grep -qE "TeX Live.*version[[:space:]]+${TL_VERSION}" \
+         ${TL_PATH}/release-texlive.txt || { \
       echo "ERROR: ${TL_REPO} does not provide TeX Live ${TL_VERSION}"; \
       echo "       (upstream may have moved to a newer release)"; \
-      echo "--- ${TL_PATH}/release-texlive.txt ---"; \
-      cat ${TL_PATH}/release-texlive.txt; \
       exit 1; \
     }
 
@@ -111,8 +121,11 @@ RUN tlmgr option repository ${TL_REPO} && \
 
 # ── CJKフォント・フォントキャッシュ設定 ─────────────────────
 # cjk-gs-integrate は TeX Live 本体のパッケージを使う。
-RUN cjk-gs-integrate.pl --cleanup --force && \
-    cjk-gs-integrate.pl --force && \
+# TeX Live に統合されたコマンド名は拡張子なしの cjk-gs-integrate。
+# cjk-gs-integrate.pl は GitHub/CTAN から直接取得した場合のファイル名で、
+# TeX Live 経由では PATH に存在しない（exit 127 になる）。
+RUN cjk-gs-integrate --cleanup --force && \
+    cjk-gs-integrate --force && \
     mktexlsr && \
     luaotfload-tool -u -f && \
     printf "%s\n" \

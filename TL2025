@@ -1,4 +1,4 @@
-FROM docker.io/library/ubuntu:24.04
+FROM docker.io/library/ubuntu:26.04
 
 LABEL maintainer="Yuwsuke Kieda <yuw [at] seikando.info>"
 
@@ -6,19 +6,35 @@ LABEL maintainer="Yuwsuke Kieda <yuw [at] seikando.info>"
 ENV TL_VERSION=2025 \
     TL_PATH=/usr/local/texlive \
     DEBIAN_FRONTEND=noninteractive \
+    DEBCONF_NOWARNINGS=yes \
     TZ=Asia/Tokyo
+
+# パッケージリポジトリ: texjp.org の年次固定 tlnet。
+# 該当年の最終状態が置かれているため、ビルド日に依存しない。
+ENV TL_REPO=https://texlive.texjp.org/${TL_VERSION}/tlnet
 
 ENV TEXMF_LOCAL_PATH=${TL_PATH}/texmf-local \
     TEXMF_DIST_PATH=${TL_PATH}/texmf-dist \
+    TEXMF_VAR_PATH=${TL_PATH}/texmf-var \
     PATH=${TL_PATH}/bin/aarch64-linux:/bin:$PATH
 
 # ── APT パッケージ ─────────────────────────────────────────
+# perl-modules は必須。--no-install-recommends だと perl だけでは入らず、
+# install-tl が要求する Pod::Usage が欠けて exit 2 で失敗することがある。
+# 名前が見つからない場合はバージョン付き（perl-modules-5.40 など）を指定する。
+#
+# git は不要になった（cjk-gs-integrate を TeX Live 本体から使うため）。
+#
+# 注: apt-get upgrade とベースイメージのタグ ubuntu:26.04 は
+# どちらもビルド日に依存する。OS 層まで凍結したい場合は
+# FROM を digest 指定（ubuntu@sha256:...）にし、upgrade を外すこと。
 RUN apt-get update && \
     apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
         wget \
         unzip \
-        git \
+        perl \
+        perl-modules \
         ghostscript \
         zsh \
         fontconfig \
@@ -31,32 +47,76 @@ RUN apt-get update && \
     rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
 
 # ── TeX Live インストール ───────────────────────────────────
+# scheme-full からドキュメント・ソースを除外する。
+# 旧名 option_doc / option_src も install-tl が内部で新名に変換するため
+# 動作は同じだが、変換に依存しない現行の名前を使う。
+# これらは tlpdb に永続化されるので、以後の tlmgr install にも効く。
 WORKDIR /tmp
 
 RUN mkdir install-tl-unx && \
     wget --retry-connrefused --tries=5 --waitretry=10 \
          -O /tmp/install-tl-unx.tar.gz \
-         https://texlive.texjp.org/${TL_VERSION}/tlnet/install-tl-unx.tar.gz && \
+         ${TL_REPO}/install-tl-unx.tar.gz && \
     tar -xz -C ./install-tl-unx --strip-components=1 \
         -f /tmp/install-tl-unx.tar.gz && \
     printf "%s\n" \
       "TEXDIR ${TL_PATH}" \
+      "TEXMFLOCAL ${TEXMF_LOCAL_PATH}" \
+      "TEXMFSYSVAR ${TEXMF_VAR_PATH}" \
+      "TEXMFSYSCONFIG ${TL_PATH}/texmf-config" \
       "selected_scheme scheme-full" \
-      "option_doc 0" \
-      "option_src 0" \
+      "instopt_adjustpath 0" \
+      "tlpdbopt_autobackup 0" \
+      "tlpdbopt_install_docfiles 0" \
+      "tlpdbopt_install_srcfiles 0" \
       > ./install-tl-unx/texlive.profile && \
     ./install-tl-unx/install-tl \
-      -repository https://texlive.texjp.org/${TL_VERSION}/tlnet/ \
+      -repository ${TL_REPO} \
       -profile ./install-tl-unx/texlive.profile && \
     rm -rf /tmp/*
 
+# ── リリース年の検証 ───────────────────────────────────────
+# TL_REPO の指定ミスで別リリースが入るのを防ぐ安全弁。
+#
+# release-texlive.txt の 1 行目は次の書式:
+#   TeX Live (https://tug.org/texlive) version 2025
+# 間に URL が挟まるため "TeX Live 2025" ではマッチしない。
+RUN cat ${TL_PATH}/release-texlive.txt; \
+    grep -qE "TeX Live.*version[[:space:]]+${TL_VERSION}" \
+         ${TL_PATH}/release-texlive.txt || { \
+      echo "ERROR: ${TL_REPO} does not provide TeX Live ${TL_VERSION}"; \
+      exit 1; \
+    }
+
+# ── doc / src 除外の検証 ───────────────────────────────────
+# profile のキー名を間違えても install-tl は警告のみで成功してしまうため、
+# 実際に doc/src が入っていないことをサイズで確認する。
+RUN DOC_MB=$(du -sm ${TEXMF_DIST_PATH}/doc    2>/dev/null | cut -f1); DOC_MB=${DOC_MB:-0}; \
+    SRC_MB=$(du -sm ${TEXMF_DIST_PATH}/source 2>/dev/null | cut -f1); SRC_MB=${SRC_MB:-0}; \
+    echo "texmf-dist/doc=${DOC_MB}MB  texmf-dist/source=${SRC_MB}MB"; \
+    tlmgr option docfiles; \
+    tlmgr option srcfiles; \
+    [ "${DOC_MB}" -lt 500 ] && [ "${SRC_MB}" -lt 200 ] || { \
+      echo "ERROR: docfiles/srcfiles were installed despite the profile."; \
+      exit 1; \
+    }
+
+# ── tlmgr の既定リポジトリ固定 ──────────────────────────────
+# 以降の手動 tlmgr 操作も年次固定リポジトリを向くようにしておく。
+RUN tlmgr option repository ${TL_REPO} && \
+    tlmgr version && \
+    tlmgr option repository
+
 # ── CJKフォント・フォントキャッシュ設定 ─────────────────────
-RUN git clone --depth=1 https://github.com/texjporg/cjk-gs-support.git && \
-    ( cd cjk-gs-support && \
-      ./cjk-gs-integrate.pl --cleanup --force && \
-      ./cjk-gs-integrate.pl --force \
-    ) && \
-    rm -rf cjk-gs-support && \
+# cjk-gs-integrate は TeX Live 本体のパッケージを使う。
+# GitHub から clone すると master の内容がビルド日に依存し、
+# 年次固定にした意味が失われるため。
+#
+# TeX Live に統合されたコマンド名は拡張子なしの cjk-gs-integrate。
+# cjk-gs-integrate.pl は GitHub/CTAN から直接取得した場合のファイル名で、
+# TeX Live 経由では PATH に存在しない（exit 127 になる）。
+RUN cjk-gs-integrate --cleanup --force && \
+    cjk-gs-integrate --force && \
     mktexlsr && \
     luaotfload-tool -u -f && \
     printf "%s\n" \
@@ -73,11 +133,18 @@ RUN git clone --depth=1 https://github.com/texjporg/cjk-gs-support.git && \
 
 # ── Volume / 作業ディレクトリ ──────────────────────────────
 # Podman rootless: UID/GID マッピングを考慮し、
-# volume マウント先のディレクトリを作成してパーミッションを緩めておく
-RUN mkdir -p /usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/fonts/otl && \
-    chmod 777 /usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/fonts/otl
+# volume マウント先のディレクトリを作成してパーミッションを緩めておく。
+#
+# 注意点が二つある。
+#   1. TEXDIR を /usr/local/texlive（年なし）にしているので、
+#      texmf-var は /usr/local/texlive/2025/... ではなくこの位置にある。
+#   2. VOLUME の JSON 配列形式では ENV が展開されない。
+#      ${TL_VERSION} を書くと literal なディレクトリが作られるため、
+#      パスは直書きする。
+RUN mkdir -p ${TEXMF_VAR_PATH}/luatex-cache/generic/fonts/otl && \
+    chmod 777 ${TEXMF_VAR_PATH}/luatex-cache/generic/fonts/otl
 
-VOLUME ["/usr/local/texlive/${TL_VERSION}/texmf-var/luatex-cache/generic/fonts/otl"]
+VOLUME ["/usr/local/texlive/texmf-var/luatex-cache/generic/fonts/otl"]
 
 WORKDIR /workdir
 
